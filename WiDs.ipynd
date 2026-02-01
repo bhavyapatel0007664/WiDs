@@ -1,0 +1,218 @@
+#STEP 1: Set up Earth Engine in Colab
+! pip install earthengine-api geemap
+
+import ee
+import geemap
+
+ee.Authenticate()
+ee.Initialize()
+
+
+
+# Do this once per session
+
+#STEP 2: Load Kutch District Boundary (Python)
+districts = ee.FeatureCollection("FAO/GAUL/2015/level2")
+
+kutch = districts.filter(
+    ee.Filter.eq('ADM2_NAME', 'Kachchh')
+)
+
+Map = geemap.Map(center=[23.7, 69.8], zoom=7)
+Map.addLayer(kutch, {}, "Kutch District")
+Map
+
+
+#This replaces the GEE Code Editor map.
+
+#STEP 3: Elevation (DEM)
+dem = ee.Image("USGS/SRTMGL1_003").clip(kutch)
+
+Map.addLayer(
+    dem,
+    {'min': 0, 'max': 300, 'palette': ['blue', 'yellow', 'brown']},
+    'Elevation'
+)
+Map
+
+#STEP 4: Terrain Feature – Slope
+slope = ee.Terrain.slope(dem)
+
+Map.addLayer(
+    slope,
+    {'min': 0, 'max': 10, 'palette': ['green', 'yellow', 'red']},
+    'Slope'
+)
+Map
+
+#STEP 5: Land Cover (ESA WorldCover)
+landcover = (
+    ee.Image('ESA/WorldCover/v100/2020')
+    .select('Map')
+    .clip(kutch)
+)
+
+Map.addLayer(landcover, {}, 'Land Cover')
+Map
+
+#STEP 6: Spatial Relationship – Distance to Coast
+coastline = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
+
+distance_to_coast = coastline.distance(1000).clip(kutch)
+
+Map.addLayer(
+    distance_to_coast,
+    {'min': 0, 'max': 50000, 'palette': ['blue', 'white', 'red']},
+    'Distance to Coast'
+)
+Map
+
+
+
+
+
+#STEP 1: Load Required Libraries
+import ee
+import geemap
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix
+
+#STEP 2: Initialize Earth Engine
+ee.Initialize()
+
+#STEP 3: Prepare Feature Stack in GEE (Python API)
+# Load boundary
+districts = ee.FeatureCollection("FAO/GAUL/2015/level2")
+kutch = districts.filter(ee.Filter.eq('ADM2_NAME', 'Kachchh'))
+
+# Elevation
+dem = ee.Image("USGS/SRTMGL1_003").clip(kutch)
+
+# Slope
+slope = ee.Terrain.slope(dem)
+
+# Land cover
+landcover = ee.Image('ESA/WorldCover/v100/2020').select('Map').clip(kutch)
+
+# Distance to coast
+coastline = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
+distance_to_coast = coastline.distance(1000).clip(kutch)
+
+# Stack features
+features_image = dem.rename('elevation') \
+    .addBands(slope.rename('slope')) \
+    .addBands(landcover.rename('landcover')) \
+    .addBands(distance_to_coast.rename('dist_coast'))
+
+#STEP 4: Sample Points for Training
+samples = features_image.sample(
+    region=kutch.geometry(),
+    scale=1000,
+    numPixels=3000,
+    geometries=True
+)
+
+#STEP 5: Convert GEE Samples to Pandas DataFrame
+data = geemap.ee_to_pandas(samples)
+data = data.dropna()
+
+#STEP 6: Create Labels (Supervised Learning)
+# Simple proxy labeling (can be refined later)
+data['label'] = np.where(data['slope'] < 5, 1, 0)
+
+
+#This is acceptable at this stage as a training proxy, and you can justify it in the report.
+
+#STEP 7: Train ML Model
+X = data[['elevation', 'slope', 'landcover', 'dist_coast']]
+y = data['label']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+#STEP 8: Model Evaluation
+y_pred = model.predict(X_test)
+
+accuracy = accuracy_score(y_test, y_pred)
+conf_matrix = confusion_matrix(y_test, y_pred)
+
+accuracy, conf_matrix
+
+#STEP 9: Feature Importance (Interpretation)
+importance = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': model.feature_importances_
+}).sort_values(by='Importance', ascending=False)
+
+importance
+
+
+
+
+
+#STEP 1: Train Model (Reuse from Week 3)
+from sklearn.ensemble import RandomForestClassifier
+
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+#STEP 2: Apply Model to Entire Feature Dataset
+# Predict suitability
+data['suitability'] = model.predict(X)
+
+#STEP 3: Convert Predictions Back to Earth Engine
+# Convert pandas back to EE FeatureCollection
+def df_to_ee(df):
+    features = []
+    for _, row in df.iterrows():
+        point = ee.Geometry.Point([row['longitude'], row['latitude']])
+        feature = ee.Feature(point, {'suitability': row['suitability']})
+        features.append(feature)
+    return ee.FeatureCollection(features)
+
+ee_predictions = df_to_ee(data)
+
+#STEP 4: Visualize Hotspot Points on Map
+Map = geemap.Map(center=[23.7, 69.8], zoom=7)
+
+Map.addLayer(
+    ee_predictions,
+    {'color': 'red'},
+    'Predicted Suitable Sites'
+)
+
+Map.addLayer(kutch, {}, 'Kutch Boundary')
+Map
+
+#STEP 5: Continuous Suitability Surface (Interpolation Proxy)
+suitability_image = ee_predictions.reduceToImage(
+    properties=['suitability'],
+    reducer=ee.Reducer.mean()
+)
+
+Map.addLayer(
+    suitability_image,
+    {'min': 0, 'max': 1, 'palette': ['blue', 'yellow', 'red']},
+    'Suitability Map'
+)
+Map
+
+#STEP 6: Export Suitability Map (GeoTIFF)
+export_task = ee.batch.Export.image.toDrive(
+    image=suitability_image,
+    description='Kutch_Renewable_Suitability',
+    scale=1000,
+    region=kutch.geometry(),
+    fileFormat='GeoTIFF'
+)
+
+
+export_task.start()
